@@ -1,0 +1,50 @@
+socket(domain, type, protocol) creates and return a file descriptor which is integer. It returns -1 if failed.
+1) domain - specifies a communication domain which is in <sys/types.h> and starts with  AF_ (like AF_INET(IPV4) or AF_INET6(IPV6)).
+2) type - specifies the communicartion semantics like SOCK_STREAM or SOCK_SEQPACKET and more.
+3) protocol - Since normally there exists only one protocol which support the socket you can specify it as 0. But if you have many sockets then
+a particular protocol must be specified in that manner.
+--------------------------------------------------------
+
+accept(sockfd, struct sockaddr* addr, socklen_t *addrlen, int flags) - system call is used with connection-based socket types
+(SOCK_STREAM, SOCK_SEQPACKET).  It extracts the first connection
+request on the queue of pending connections for the listening socket,
+sockfd, creates a new connected socket, and returns a new file
+descriptor referring to that socket.  The newly created socket is not
+in the listening state.  The original socket sockfd is unaffected by
+this call.
+
+1) sockfd is a socket that has been created with socket(), bound to a local address with bind(), and is listening for
+connections after a listen().
+2) This structure is filled in with the address of the peer socket. IF NULL then addrlen also should be NULL
+3)  The addrlen argument is a value-result argument: the caller must initialize it to contain the size (in bytes) of the structure pointed
+to by addr; on return it will contain the actual size of the peer address.
+4) If flags is 0, then accept4() is the same as accept(). Also you can use SOCK_NONBLOCK and SOCK_CLOEXEC
+--------------------------------------------------------
+
+select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds, struct timeval *timeout)
+
+return the number of file descriptors contained in the three returned descriptor sets which may be zero
+if the timeout expires before anything interesting happen
+
+allow a program to monitor multiple file
+descriptors, waiting until one or more of the file descriptors become
+"ready" for some class of I/O operation or if there is an error return -1.
+Block can occur only if you write in a full pipe.
+---------------------------------------------------------
+
+bind(int sockfd const struct sockaddr *addr, socketlen_t addrlen)
+
+From comments:
+Bind the server. Binding means, we are telling kernel(OS) that any data 
+you recieve with dest ip address = 192.168.56.101, and tcp port no = 2000, pls send that data to this process
+bind() is a mechnism to tell OS what kind of data server process is interested in to recieve
+
+From doc:
+When a socket is created with socket(2), it exists in a name space
+(address family) but has no address assigned to it.  bind() assigns
+the address specified by addr to the socket referred to by the file
+descriptor sockfd.  addrlen specifies the size, in bytes, of the
+address structure pointed to by addr.  Traditionally, this operation
+is called “assigning a name to a socket”.
+
+not blocking.
