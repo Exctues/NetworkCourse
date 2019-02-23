@@ -6,14 +6,10 @@
 #include <netdb.h>
 #include <memory.h>
 #include <unistd.h>
-#include "common.h"
 
 #define SERVER_PORT 2001
-#define SERVER_IP_ADDRESS "127.0.0.1"
-#define SEND_TIMES 4
-
-test_struct_t client_data;
-result_struct_t result;
+#define SERVER_IP_ADDRESS "127.0.0.1" // TODO: change it on virtualbox 
+#define SEND_TIMES 7
 
 void setup_udp_communication()
 {

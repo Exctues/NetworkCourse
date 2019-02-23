@@ -1,6 +1,4 @@
-﻿//Taken from Abhishek Sagar
-
-#include <stdio.h>
+﻿#include <stdio.h>
 #include <stdlib.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -8,35 +6,53 @@
 #include <memory.h>
 #include <errno.h>
 #include <sys/select.h>
-#include "common.h"
 #include <arpa/inet.h>
 #include <signal.h>
 #include <unistd.h>
 #include <pthread.h>
 
+// MAX_THREADS should be allocated dynamicaly but for this task let me simply ignore packets which are late.
 #define SERVER_PORT 2001
-#define MAX_THREADS 10
-#define BUFFER_SIZE 256
-
-// test_struct_t test_struct;
-// result_struct_t res_struct;
+#define MAX_THREADS 5
+#define BUFFER_SIZE 128
 
 int sockfd = 0;
 
-char THREAD_BUFFER[MAX_THREADS][BUFFER_SIZE]; // there is buffer for each thread; [X][BUFFER_SIZE-1] == 0  means nothing to do.
+int THREAD_NBYTES[MAX_THREADS]; // 0 means that this thread is available and doing nothing. Other values means there is a job for the thread.
+char THREAD_BUFFER[MAX_THREADS][BUFFER_SIZE];
+int number_of_free_threads;
 
 void *thread_work(void *data)
 {
-    
     unsigned int thread_num = (unsigned int)data;
     while (1)
     {
-        if (THREAD_BUFFER[thread_num][BUFFER_SIZE - 1] > 0)
+        if (THREAD_NBYTES[thread_num] > 0)
         {
-            printf("thread %d have processed with string \"%s\"\n", thread_num, THREAD_BUFFER[thread_num]);
-            THREAD_BUFFER[thread_num][BUFFER_SIZE - 1] = 0; // work is done
+            printf("thread %d starting to process with \"%s\"\n", thread_num, THREAD_BUFFER[thread_num]);
+            //fflush(stdin);
+            sleep(1);
+            printf("thread %d have done with string \"%s\"\n", thread_num, THREAD_BUFFER[thread_num]);
+            //fflush(stdin);
+            THREAD_NBYTES[thread_num] = 0; // work is done
+            number_of_free_threads++;
         }
     }
+}
+/** 
+ * returns number of first free thread if there any otherwise (if all are busy) -1.
+*/
+int get_next_free_thread()
+{
+    for (int i = 0; i < MAX_THREADS; i++)
+    {
+        if (THREAD_NBYTES[i] == 0)
+        {
+            return i;
+        }
+    }
+
+    return -1;
 }
 
 void setup_udp_server_communication()
@@ -44,11 +60,10 @@ void setup_udp_server_communication()
     int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd == -1)
     {
-        fprintf(stderr, "socket wrong\n");
+        fprintf(stderr, "Server: socket wrong\n");
         exit(1);
     }
 
-    char *msgto_client = "Hello form server";
     struct sockaddr_in servaddr, clientaddr;
 
     memset(&servaddr, 0, sizeof(servaddr));
@@ -68,21 +83,30 @@ void setup_udp_server_communication()
     pthread_t threads[MAX_THREADS];
     for (long i = 0; i < MAX_THREADS; i++)
     {
-        pthread_create(&threads[i], NULL, thread_work, (void *) i);
+        pthread_create(&threads[i], NULL, thread_work, (void *)i);
     }
 
-    int nrec = 0; // number of received packets
+    memset(THREAD_NBYTES, 0, sizeof THREAD_NBYTES); // 0 bytes means nothing to do for thread so it is free.
+    number_of_free_threads = MAX_THREADS;
+
     while (1)
     {
-        printf("Server: waiting to recvfrom...\n");
+        while (number_of_free_threads <= 0)
+        {
+            printf("No available threads. \n");
+            sleep(1);
+        } // wait until at least one thread will be available
 
+        int next_thread = get_next_free_thread();
         int nbytes, len;
-        int next_thread = nrec % MAX_THREADS;
-        nbytes = recvfrom(sockfd, (char *)(THREAD_BUFFER[nrec % MAX_THREADS]), BUFFER_SIZE, 0, (struct sockaddr *)&clientaddr, &len);
-
+        printf("next available thread is %d \n", next_thread);
+        printf("Server: waiting to recvfrom...\n");
+        nbytes = recvfrom(sockfd, (char *)(&THREAD_BUFFER[next_thread]), BUFFER_SIZE, 0, (struct sockaddr *)&clientaddr, &len);
+        printf("# of free threads: %d \n", number_of_free_threads);
+        
+        number_of_free_threads--;
         THREAD_BUFFER[next_thread][nbytes] = '\0';
-        THREAD_BUFFER[next_thread][BUFFER_SIZE - 1] = nbytes;
-        nrec++;
+        THREAD_NBYTES[next_thread] = nbytes;
     }
     close(sockfd);
 }
