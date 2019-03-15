@@ -37,6 +37,7 @@ void *thread_work(void *data)
             THREAD_NBYTES[thread_num] = 0; // work is done
             number_of_free_threads++;
         }
+        sleep(0.2); 
     }
 }
 /** 
@@ -96,7 +97,7 @@ void setup_udp_server_communication()
             printf("No available threads. \n");
             sleep(1);
         } // wait until at least one thread will be available
-
+    
         int next_thread = get_next_free_thread();
         int nbytes, len;
         printf("next available thread is %d \n", next_thread);

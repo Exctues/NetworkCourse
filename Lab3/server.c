@@ -10,7 +10,6 @@
 #include <sys/select.h>
 #include "common.h"
 #include <sys/socket.h>
-#include <netinet/in.h>
 #include <arpa/inet.h>
 
 /*Server process is running on this port no. Client has to send data to this port no*/
