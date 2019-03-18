@@ -14,13 +14,15 @@
 #define PORT 2002
 #define IP "192.168.31.105"
 #define BUFFER_SIZE 128
+
 #define MAX_NEIGHBOURS 32
-#define MAX_NAME_LENGTH 32
-#define MAX_THREADS 64
+#define MAX_NODE_NAME_LENGTH 32
+#define MAX_FILE_NAME_LENGTH 64
+#define MAX_THREADS 128
 // my 192.168.31.105
-// friend 192.168.31.64
+
 struct Node {
-    char name[MAX_NAME_LENGTH];
+    char name[MAX_NODE_NAME_LENGTH];
     struct sockaddr_in address;
 };
 struct thread_data {
@@ -29,20 +31,21 @@ struct thread_data {
 };
 
 struct Node known_nodes[MAX_NEIGHBOURS];
-int connection_with_node[MAX_NEIGHBOURS]; // means we don't have open connection with this node. 1 means we have.
-int known_nodes_exist[MAX_NEIGHBOURS]; // 1 means there is a node, 0 means the slot is free.
+int connection_with_node[MAX_NEIGHBOURS]; // 0 means we don't have open connection with this node. 1 means we have.
+int known_nodes_exist[MAX_NEIGHBOURS];    // 0 means the slot is free, 1 means there is a node.
 int size_known_nodes = 0;
 
 int master_sockfd;
 fd_set readfds;
 
 // Info about myself
-char myname[MAX_NAME_LENGTH];
-struct sockaddr_in our_addr;
+char myname[MAX_NODE_NAME_LENGTH];
+struct Node our_node;
 
-// TODO change passing whole struct to passing just pointer. Understand why there always different ports(but since it is 1 program we shouldn't care about port)
+
 /** Compares two ip's. Returns 0 if ip's are equal and -1 otherwise*/
 int addrcmp(struct sockaddr_in a, struct sockaddr_in b) {
+    // TODO change passing whole struct to passing just pointer. Understand why there always different ports(but since it is 1 program we shouldn't care about port)
     char astr[32];
     char bstr[32];
     strcpy(astr, inet_ntoa(a.sin_addr));
@@ -54,25 +57,20 @@ int addrcmp(struct sockaddr_in a, struct sockaddr_in b) {
 }
 
 /** Finds new free slot and adds new assembled node in that slot. Returns pos of new added Node*/
-int add_known_node(char name[MAX_NAME_LENGTH], struct sockaddr_in address, int busy) {
-//    printf("FIRST TRY our = %s with friend'уs = %s \n", inet_ntoa(our_addr.sin_addr), inet_ntoa(address.sin_addr));
-//    printf("SECOND TRY our = %s with friend's = %s \n", inet_ntoa(address.sin_addr), inet_ntoa(our_addr.sin_addr));
-    printf("I am going to add node with name %s\n", name);
-    printf("Going to cmp our = %s ", inet_ntoa(our_addr.sin_addr));
-    printf("with friend's = %s\n", inet_ntoa(address.sin_addr));
-    if (addrcmp(our_addr, address) == 0) {
-        printf("Prevent to add myself.\n");
+int add_known_node(struct Node node, int busy) {
+    printf("I am going to add node with name %s\n", node.name);
+    if (addrcmp(node.address, our_node.address) == 0) {
+//        printf("Prevent to add myself.\n");
         return -1;
     }
 
     for (int i = 0; i < MAX_NEIGHBOURS; ++i) {
         if (known_nodes_exist[i] == 0) {
-            strcpy(known_nodes[i].name, name);
-            known_nodes[i].address = address;
+            known_nodes[i] = node;
             connection_with_node[i] = busy;
-
             known_nodes_exist[i] = 1;
             size_known_nodes++;
+
             printf("Successfully added.\n");
             return i;
         }
@@ -82,86 +80,82 @@ int add_known_node(char name[MAX_NAME_LENGTH], struct sockaddr_in address, int b
     return -1;
 }
 
-/** Search by address. Returns pos of that node and -1 if it doesnt exist*/
-int find_known_node(struct sockaddr_in address) {
+/** Search by node's address. Returns pos of that node and -1 if it doesnt exist*/
+int find_known_node(struct Node node) {
     for (int i = 0; i < MAX_NEIGHBOURS; ++i) {
-        if (known_nodes_exist[i] == 1 && addrcmp(address, known_nodes[i].address)) {
+        if (known_nodes_exist[i] == 1 && addrcmp(node.address, known_nodes[i].address)) {
             return i;
         }
     }
+
     return -1;
 }
 
-void exchange_info_with(struct sockaddr_in to_connect) {
-    int tmp_socket = socket(AF_INET, SOCK_STREAM, 0);
-    unsigned int n, len;
-    if (tmp_socket == -1) {
-        printf("check_available: tmp_socket failed\n");
+
+void sync_with(struct sockaddr_in to_connect) {
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    unsigned int len;
+    if (sockfd == -1) {
+        printf("ping_know_nodes: sockfd failed\n");
         exit(0);
     }
 
-    if ((connect(tmp_socket, (struct sockaddr *) &to_connect, sizeof(to_connect))) != 0) {
-        printf("Connection with %s:%u failed\n", inet_ntoa(to_connect.sin_addr), ntohs(to_connect.sin_port));
-        close(tmp_socket);
+    if ((connect(sockfd, (struct sockaddr *) &to_connect, sizeof(to_connect))) != 0) {
+        printf("ping_know_nodes: Connection with %s:%u failed\n", inet_ntoa(to_connect.sin_addr), ntohs(to_connect.sin_port));
+        close(sockfd);
         return;
-        exit(0);// in case you want to exit on fail.
-    }
-
-    int pos = find_known_node(to_connect);
-    if (pos >= 0) {
-        connection_with_node[pos] = 1;
     }
 
     printf("Connected with %s:%u successfully\n", inet_ntoa(to_connect.sin_addr), ntohs(to_connect.sin_port));
-    char *hello = "exchange";
-    sendto(tmp_socket, hello, strlen(hello), 0, (struct sockaddr *) &to_connect, sizeof(to_connect));
+    char *hello = "sync";
+    sendto(sockfd, hello, strlen(hello), 0, (struct sockaddr *) &to_connect, sizeof(to_connect));
 
-    //1) Get the name
-    ssize_t nbytes;
-    char name[MAX_NAME_LENGTH];
-    memset(name, 0, sizeof(char) * MAX_NAME_LENGTH);
+    //1) Get their node
+    struct Node their_node;
+    recvfrom(sockfd, &their_node, sizeof(struct Node), 0, (struct sockaddr *) &to_connect, &len);
 
-    nbytes = recvfrom(tmp_socket, &name[0], sizeof(char) * MAX_NAME_LENGTH, 0, (struct sockaddr *) &to_connect, &len);
-    name[nbytes] = '\0';
-    printf("Received name is %s\n", name);
+    // Check if we already know this node.
+    int pos = find_known_node(their_node);
+
     //add this node as known
     if (pos == -1)
-        pos = add_known_node(name, to_connect, 1);
-    //2) send name
-    sendto(tmp_socket, myname, strlen(myname), 0, (struct sockaddr *) &to_connect, sizeof(to_connect));
-    //3) Get n = number of nodes our friend-node know.
-    recvfrom(tmp_socket, &n, sizeof(int), 0, (struct sockaddr *) &to_connect, &len);
-    printf("Received!! n = number of nodes of \"%s\" n = %d\n", name, n);
+        pos = add_known_node(their_node, 1);
+    else
+        connection_with_node[pos] = 1;
+
+    //2) send ourselves
+    sendto(sockfd, &our_node, sizeof(struct Node), 0, (struct sockaddr *) &to_connect, sizeof(to_connect));
+
+    //3) Get n (number of nodes) their node knows.
+    int k;
+    recvfrom(sockfd, &k, sizeof(int), 0, (struct sockaddr *) &to_connect, &len);
 
     //4) get all nodes friend-node know, maybe here we can receive the whole Node structure.
-    for (int i = 0; i < n; ++i) {
-        char cur_node_name[MAX_NAME_LENGTH];
-        struct sockaddr_in cur_node_sockaddr_in;
-        recvfrom(tmp_socket, &cur_node_name, sizeof(cur_node_name), 0, (struct sockaddr *) &to_connect, &len);
-        recvfrom(tmp_socket, &cur_node_sockaddr_in, sizeof(cur_node_sockaddr_in), 0, (struct sockaddr *) &to_connect, &len);
-        add_known_node(cur_node_name, cur_node_sockaddr_in, 0);
+    for (int i = 0; i < k; ++i) {
+        struct Node tmp_node;
+        recvfrom(sockfd, &tmp_node, sizeof(struct Node), 0, (struct sockaddr *) &to_connect, &len);
+        if (find_known_node(their_node) == -1) {
+            add_known_node(tmp_node, 0);
+        }
     }
-    //TODO here we need sync;
+
     //send number of nodes we are going to send
-    int k = size_known_nodes - 1;
-    sendto(tmp_socket, &k, sizeof(int), 0, (struct sockaddr *) &to_connect, sizeof(to_connect));
+    int n = size_known_nodes - 1;
+    sendto(sockfd, &k, sizeof(int), 0, (struct sockaddr *) &to_connect, sizeof(to_connect));
+
     //send all nodes
     for (int i = 0, sent = 0; i < MAX_NEIGHBOURS && sent < n; ++i) {
-        if (known_nodes_exist[i] && addrcmp(known_nodes[i].address, to_connect) != 0) {
-            // send name
-            sendto(tmp_socket, &known_nodes[i].name, sizeof(known_nodes[i].name), 0, (struct sockaddr *) &to_connect, sizeof(to_connect));
-            // send address_in
-            sendto(tmp_socket, &known_nodes[i].address, sizeof(known_nodes[i].address), 0, (struct sockaddr *) &to_connect, sizeof(to_connect));
+        if (known_nodes_exist[i] && i != pos) {
+            sendto(sockfd, &known_nodes[i], sizeof(struct Node), 0, (struct sockaddr *) &to_connect, sizeof(to_connect));
             sent++;
         }
     }
 
-
-    close(tmp_socket);
-    if (pos >= 0)
+    close(sockfd);
+    if (pos >= 0) // we should mark that connection is closed
         connection_with_node[pos] = 0;
 
-    printf("Connection is closed with \"%s\"\n", name);
+    printf("Socket to communicate with \"%s\" is closed.\n", their_node.name);
 }
 
 /** Do the job with given thread_data struct (socket, client_addr) */
@@ -170,11 +164,6 @@ void *thread_work(void *data) {
     int common_sock_fd = thread_data->sock_fd;
     struct sockaddr_in client_addr = thread_data->client_addr;
 
-    int pos = find_known_node(client_addr);
-    if (pos >= 0) {
-        connection_with_node[pos] = 1;
-    }
-
     ssize_t nbytes;
     unsigned int len;
     char *buffer = calloc(BUFFER_SIZE, sizeof(char)); // buffer with all zeroes initially.
@@ -182,33 +171,31 @@ void *thread_work(void *data) {
     nbytes = recvfrom(common_sock_fd, buffer, BUFFER_SIZE, 0, (struct sockaddr *) &client_addr, &len);
     buffer[nbytes] = '\0';
 
-    if (strcmp(buffer, "exchange") == 0) {
-        printf("exchange command received.\n");
-        // 1) we send our name
-        sendto(common_sock_fd, &myname[0], sizeof(myname), 0, (struct sockaddr *) &client_addr, sizeof(client_addr));
-        printf("Sent ourname = \"%s\".\n", myname);
+    int pos = -1;
+    struct Node their_node;
+    if (strcmp(buffer, "sync") == 0) {
+        printf("sync command received.\n");
+        // 1) we send info about ourselves.
+        sendto(common_sock_fd, &our_node, sizeof(struct Node), 0, (struct sockaddr *) &client_addr, sizeof(client_addr));
 
-        // 2) we receive its name.
-        char name[32];
-        nbytes = recvfrom(common_sock_fd, &name[0], sizeof(name), 0, (struct sockaddr *) &client_addr, &len);
-        name[nbytes] = '\0';
-        printf("Received name is \"%s\".\n", name);
+        // 2) receive their info.
+        recvfrom(common_sock_fd, &their_node, sizeof(struct Node), 0, (struct sockaddr *) &client_addr, &len);
 
-        // Add this node
+        // Add received this node.
+        pos = find_known_node(their_node);
         if (pos == -1)
-            pos = add_known_node(name, client_addr, 1);
-        int n = size_known_nodes - 1; // we need to send all nods but not friend's info for himself.
+            pos = add_known_node(their_node, 1);
+        else
+            connection_with_node[pos] = 1;
 
         // 3) we send n = # of nodes we know.
+        int n = size_known_nodes - 1; // we need to send all nodes but not their's.
         sendto(common_sock_fd, &n, sizeof(int), 0, (struct sockaddr *) &client_addr, sizeof(client_addr));
 
         // 4) we send n our nodes.
         for (int i = 0, sended = 0; i < MAX_NEIGHBOURS && sended < n; ++i) {
-            if (known_nodes_exist[i] && addrcmp(known_nodes[i].address, client_addr) != 0) {
-                // send name
-                sendto(common_sock_fd, &known_nodes[i].name, sizeof(known_nodes[i].name), 0, (struct sockaddr *) &client_addr, sizeof(client_addr));
-                // send address_in
-                sendto(common_sock_fd, &known_nodes[i].address, sizeof(known_nodes[i].address), 0, (struct sockaddr *) &client_addr, sizeof(client_addr));
+            if (known_nodes_exist[i] && pos != i) {
+                sendto(common_sock_fd, &known_nodes[i], sizeof(struct Node), 0, (struct sockaddr *) &client_addr, sizeof(client_addr));
                 sended++;
             }
         }
@@ -219,34 +206,37 @@ void *thread_work(void *data) {
 
         // 6) we receive this k nodes.
         for (int i = 0; i < k; ++i) {
-            char cur_node_name[MAX_NAME_LENGTH];
-            struct sockaddr_in cur_node_sockaddr_in;
-            // send name
-            recvfrom(common_sock_fd, &cur_node_name, sizeof(cur_node_name), 0, (struct sockaddr *) &client_addr, &len);
-
-            // receive address_in
-            recvfrom(common_sock_fd, &cur_node_sockaddr_in, sizeof(cur_node_sockaddr_in), 0, (struct sockaddr *) &client_addr, &len);
-
-            //add it
-            add_known_node(cur_node_name, cur_node_sockaddr_in, 0);
+            struct Node tmp_node;
+            recvfrom(common_sock_fd, &tmp_node, sizeof(struct Node), 0, (struct sockaddr *) &client_addr, &len);
+            if (find_known_node(tmp_node) == -1) {
+                add_known_node(tmp_node, 0);
+            }
         }
     } else if (strcmp(buffer, "ping") == 0) {
         printf("ping command received\n");
-        int posnode = find_known_node(client_addr);
-        printf("posnode = %d.\n", posnode);
-        if (posnode == -1) {
-            printf("I am going to exchange\n\n");
-            exchange_info_with(client_addr);
-        }
+
+    } else if (strcmp(buffer, "getFile") == 0) {
+        printf("getFile received");
+        // 1) Wait for the name of file
+        char filename[MAX_FILE_NAME_LENGTH];
+        recvfrom(common_sock_fd, &filename, MAX_FILE_NAME_LENGTH * sizeof(char), 0, (struct sockaddr *) &client_addr, &len);
+        // 2) Check if we have such file
+        // 3) If file exists then send number of words this file has and -1 otherwise
+        // 4) send file word-by-word
     } else {
         printf("UNKNOWN COMMAND. I don't know what \"%s\" means..... HELP PLS.\n", buffer);
     }
 
-    printf("Closing connection with %s:%u ....\n", inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
     close(common_sock_fd);
-    if (pos >= 0)
+    if (pos >= 0) { // we should mark that connection is closed
+        printf("VSE OK OTKL!!!!\n");
         connection_with_node[pos] = 0;
-    printf("Done. Connection is closed.\n");
+    }
+    if (strlen(their_node.name) > 1)
+        printf("Socket to communicate with \"%s\" is closed.\n", their_node.name);
+    else {
+        printf("Socket to communicate is closed.\n");
+    }
 
     free(data);
     free(buffer);
@@ -255,7 +245,7 @@ void *thread_work(void *data) {
 int ping(int i) {
     int tmp_socket = socket(AF_INET, SOCK_STREAM, 0);
     if (tmp_socket == -1) {
-        printf("check_available, ping: tmp_socket failed\n");
+        printf("ping_know_nodes, ping: tmp_socket failed\n");
         exit(0);
     }
 
@@ -264,22 +254,19 @@ int ping(int i) {
     char *ping = "ping";
     if ((connect(tmp_socket, (struct sockaddr *) &known_nodes[i].address, sizeof(known_nodes[i].address))) == 0) {
         sendto(tmp_socket, ping, strlen(ping), 0, (struct sockaddr *) &known_nodes[i].address, sizeof(known_nodes[i].address));
-        printf("Node with name \"%s\" is still alive, its address is %s:%u .\n", known_nodes[i].name,
+        printf("Node with name \"%s\" is still alive, its address is %s:%u.\n", known_nodes[i].name,
                inet_ntoa(known_nodes[i].address.sin_addr), ntohs(known_nodes[i].address.sin_port));
-        //TODO maybe ask "do you know -(de way)- me before set needing in exchange"
-//        need_exchange = 1;
     } else {
-        // ONE MORE CHANCE MAFAKAAAAAAAAAAAAAAAAAAA!!1111!
+        printf("second chance\n");
         sleep(1);
         if ((connect(tmp_socket, (struct sockaddr *) &known_nodes[i].address, sizeof(known_nodes[i].address))) == 0) {
             sendto(tmp_socket, ping, strlen(ping), 0, (struct sockaddr *) &known_nodes[i].address, sizeof(known_nodes[i].address));
-            printf("Node with name \"%s\" is still alive, its address is %s:%u .\n", known_nodes[i].name,
+            printf("Node with name \"%s\" is still alive, its address is %s:%u.\n", known_nodes[i].name,
                    inet_ntoa(known_nodes[i].address.sin_addr), ntohs(known_nodes[i].address.sin_port));
-            //TODO maybe ask "do you know -(de way)- me before set needing in exchange"
-//        need_exchange = 1;
         } else {
-            printf("Node with name \"%s\" is not alive anymore so we delete it its address is %s:%u .\n", known_nodes[i].name,
+            printf("Node with name \"%s\" is not alive anymore so we delete it its address is %s:%u.\n", known_nodes[i].name,
                    inet_ntoa(known_nodes[i].address.sin_addr), ntohs(known_nodes[i].address.sin_port));
+
             known_nodes_exist[i] = 0; // delete this node
             size_known_nodes--;
         }
@@ -290,11 +277,10 @@ int ping(int i) {
     return need_exchange;
 }
 
-//TODO inside loop add: If we don't know any node but know, from arguments, where we can connect then connect.
 /** Checks all known nodes if they are still live. Node runs thread to do this job before entering main loop*/
-void *check_available(void *data) {
-    sleep(3);
-    printf("check_available() started.\n");
+void *ping_know_nodes(void *data) {
+    //TODO inside loop add: If we don't know any node but know, from arguments, where we can connect then connect.
+    printf("ping_know_nodes() started.\n");
     while (1) {
         printf("size of known nodes is %d\n", size_known_nodes);
         for (int i = 0; i < MAX_NEIGHBOURS; ++i) {
@@ -304,7 +290,7 @@ void *check_available(void *data) {
                     int need_exchange = ping(i);
                     if (need_exchange == 1) {
                         printf("Let's exchange\n");
-                        exchange_info_with(known_nodes[i].address);
+                        sync_with(known_nodes[i].address);
                     }
                 } else {
                     printf("I am still connected with \"%s\".\n", known_nodes[i].name);
@@ -315,8 +301,8 @@ void *check_available(void *data) {
     }
 }
 
-
 void setup_node(int argc, char **argv) {
+
     master_sockfd = socket(AF_INET, SOCK_STREAM, 0); // master socket. Used as entrance point only.
 
     if (master_sockfd == -1) {
@@ -328,13 +314,15 @@ void setup_node(int argc, char **argv) {
         perror("setsockopt(SO_REUSEADDR) failed");
     }
 
-    memset(&our_addr, 0, sizeof(our_addr));
-    our_addr.sin_family = AF_INET;
-    our_addr.sin_addr.s_addr = inet_addr(IP);
-    our_addr.sin_port = htons(PORT);
+    strcpy(our_node.name, argv[1]); // set our name
+    //set our address family, ip, port
+    memset(&our_node.address, 0, sizeof(struct sockaddr_in));
+    our_node.address.sin_family = AF_INET;
+    our_node.address.sin_addr.s_addr = inet_addr(IP);
+    our_node.address.sin_port = htons(PORT);
 
 
-    if ((bind(master_sockfd, (struct sockaddr *) &our_addr, sizeof(our_addr))) == -1) {
+    if ((bind(master_sockfd, (struct sockaddr *) &our_node.address, sizeof(struct sockaddr_in))) == -1) {
         fprintf(stderr, "Bind() failed\n");
         exit(0);
     }
@@ -343,21 +331,21 @@ void setup_node(int argc, char **argv) {
         exit(0);
     }
 
-    if (argc == 4) {
-
+    if (argc == 4) { // need to connect to some entrance point first
         struct sockaddr_in to_connect;
         to_connect.sin_family = AF_INET;
         to_connect.sin_addr.s_addr = inet_addr(argv[2]);
         to_connect.sin_port = htons((uint16_t) atoi(argv[3]));
 
-        printf("I am going to connect to %s:%u\n", inet_ntoa(to_connect.sin_addr), ntohs(to_connect.sin_port));
+        printf("I am going to sync with entrance point %s:%u\n", inet_ntoa(to_connect.sin_addr), ntohs(to_connect.sin_port));
 
         //TODO finish exchange.
-        exchange_info_with(to_connect);
+        sync_with(to_connect);
     }
 
     pthread_t availability_check_thread;
-    pthread_create(&availability_check_thread, NULL, check_available, NULL);
+
+    pthread_create(&availability_check_thread, NULL, ping_know_nodes, NULL);
     pthread_t pthreads[MAX_THREADS];
     unsigned int next_thread = 0;
 
@@ -415,6 +403,7 @@ int main(int argc, char **argv) {
         exit(0);
     }
     memset(known_nodes_exist, 0, sizeof(int) * MAX_NEIGHBOURS);
+    memset(connection_with_node, 0, sizeof(int) * MAX_NEIGHBOURS);
     strcpy(myname, argv[1]);
     signal(SIGINT, sig_handler);
     setup_node(argc, argv);
