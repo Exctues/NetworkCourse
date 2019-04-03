@@ -12,8 +12,8 @@
 #include <pthread.h>
 #include <dirent.h>
 
-#define PORT 2002
-#define IP "192.168.31.105"
+#define PORT 2000
+#define IP "10.240.21.91"
 
 //Constants
 #define MAX_IP_LENGTH 32
@@ -23,20 +23,26 @@
 #define MAX_FILE_LIST_LENGTH 256
 #define MAX_FILE_NAME_LENGTH 256
 #define MAX_NODE_NAME_LENGTH 64
-#define MAX_WORD_LENGTH 64
+#define MAX_WORD_LENGTH 500
 #define MAX_THREADS 64
-#define MAX_CONNECTIONS 16
-
+#define MAX_CONNECTIONS 64
+#define MAX_SYNC_IN_MOMENT 5
+#define MAX_BLACKLIST_SIZE 256
 //Commands
 #define SYNC 1
 #define REQUEST 0
 
+//Mutex
+pthread_mutex_t sync_mutex;
+
+//Utility staff
 FILE *logs;
 
 
 struct Node {
     char name[MAX_NODE_NAME_LENGTH];
     struct sockaddr_in address;
+    int number_of_connection_now; // we don't need it now. Reserved for future.
 };
 
 struct thread_data {
@@ -50,21 +56,32 @@ struct filename_node {
     int present; //0 means there is no such node, 1 means you can use this node to download file.
 };
 
+struct ip_connections {
+    char ip[MAX_IP_LENGTH];
+    int number_of_connections_now;
+    int exist;
+};
+
 char our_files[MAX_FILE_LIST_LENGTH][MAX_FILE_NAME_LENGTH]; // here we store filenames of files we have in our "files" folder.
-int our_files_exists[MAX_FILE_LIST_LENGTH]; // means the slot if free, 1 means there is a filename.
+int our_files_exist[MAX_FILE_LIST_LENGTH]; // means the slot if free, 1 means there is a filename.
 int size_our_files = 0;
 
 struct filename_node file_list[MAX_FILE_LIST_LENGTH];
 struct Node known_nodes[MAX_NEIGHBOURS];
-int known_nodes_exist[MAX_NEIGHBOURS];    // 0 means the slot is free, 1 means there is a node.
+int known_nodes_exist[MAX_NEIGHBOURS]; // 0 means the slot is free, 1 means there is a node.
 int size_known_nodes = 0;
 
-int master_sockfd; //it should be global because we need to close when SIGINT occurs.
+char blacklist[MAX_BLACKLIST_SIZE][MAX_IP_LENGTH];
+int blacklist_exist[MAX_BLACKLIST_SIZE];
+
+struct ip_connections ip_con[MAX_BLACKLIST_SIZE];
+
+int master_sockfd; // it should be global because we need to close when SIGINT occurs.
 
 // Info about myself
 struct Node our_node;
 
-/** Compares two ip's. Returns 0 if ip's are equal and -1 otherwise*/
+/** Compares two ip's. Returns 0 if ip's are equal and -1 otherwise */
 int addrcmp(const struct sockaddr_in a, const struct sockaddr_in b) {
     // TODO not urgent: change passing whole struct to passing just a pointer.
     char astr[32];
@@ -77,14 +94,81 @@ int addrcmp(const struct sockaddr_in a, const struct sockaddr_in b) {
     return -1;
 }
 
+int find_ip_con(char *ip) {
+    for (int i = 0; i < MAX_BLACKLIST_SIZE; ++i) {
+        if (ip_con[i].exist == 1 && strcmp(ip_con[i].ip, ip) == 0) {
+
+        }
+    }
+    return -1;
+}
+
+/** return pos where 'ip_connections struct' was inserted in ip_con array */
+int add_ip_con(char *ip) {
+    for (int i = 0; i < MAX_BLACKLIST_SIZE; ++i) {
+        if (ip_con[i].exist == 0) {
+            ip_con->exist = 1;
+            ip_con->number_of_connections_now = 0;
+            ip_con->exist = 1;
+            strcpy(ip_con->ip, ip);
+            return i;
+        }
+    }
+    return -1;
+}
+
+int increment_ip_con(char *ip) {
+    int pos = find_ip_con(ip);
+    if (pos == -1) {
+        int inserted_pos = add_ip_con(ip);
+        if (inserted_pos >= 0) {
+            ip_con[inserted_pos].number_of_connections_now++;
+            return inserted_pos;
+        }
+    } else {
+        ip_con[pos].number_of_connections_now++;
+        return pos;
+    }
+    return -1;
+}
+
+void decrement_ip_con(char *ip) {
+    int pos = find_ip_con(ip);
+    ip_con[pos].number_of_connections_now--;
+}
+
+/** 0 if ip is in blacklist, -1 otherwise */
+int pos_ip_in_blacklist(char *ip) {
+    for (int i = 0; i < MAX_BLACKLIST_SIZE; ++i) {
+        if (blacklist_exist[i] == 1 && strcmp(ip, blacklist[i]) == 0) {
+            return i;
+        }
+    }
+
+    return -1;
+}
+
+int blacklist_ip(char *ip) {
+    for (int i = 0; i < MAX_BLACKLIST_SIZE; ++i) {
+        if (blacklist_exist[i] == 0) {
+            blacklist_exist[i] = 1;
+            strcpy(blacklist[i], ip);
+            return i;
+        }
+    }
+
+    fprintf(logs, "Black list is full\n.");
+    return -1;
+}
+
 /** Add name of file which is from our "files" folder */
 void add_our_files(const char *filename) {
     for (int i = 0; i < MAX_FILE_LIST_LENGTH; ++i) {
-        if (our_files_exists[i] == 0) { // if there is free slot
+        if (our_files_exist[i] == 0) { // if there is free slot
             strcpy(our_files[i], filename);
-            our_files_exists[i] = 1;
+            our_files_exist[i] = 1;
             size_our_files++;
-            fprintf(logs,"add_our_files(): filename \"%s\" successfully added..\n", filename);
+            fprintf(logs, "add_our_files(): filename \"%s\" successfully added..\n", filename);
             return;
         }
     }
@@ -103,12 +187,12 @@ int find_pos_of_node_with_file(const char *filename) {
     return -1;
 }
 
-void insert_file_list(const char *filename, const struct Node node) {
+void insert_file_list(const char *filename, struct Node node) {
     fprintf(logs, "insert_file_list(): Going to add \"%s\"\n", filename);
 
     // Check if we already have this record.
     // IMPORTANT!! It makes system limited. We know only one node with unique filename.
-    // but it is easy to maintain.
+    // On the other hand it is easy to maintain.
     int pos = find_pos_of_node_with_file(filename);
     if (pos == -1) {
         for (int i = 0; i < MAX_FILE_LIST_LENGTH; ++i) {
@@ -120,7 +204,7 @@ void insert_file_list(const char *filename, const struct Node node) {
                 return;
             }
         }
-        fprintf(logs,"insert_file_list(): No space left.\n");
+        fprintf(logs, "insert_file_list(): No space left.\n");
     } else {
         fprintf(logs, "insert_file_list(): We already have \"%s\".\n", filename);
     }
@@ -128,11 +212,18 @@ void insert_file_list(const char *filename, const struct Node node) {
 
 int find_pos_of_file_in_our_files(const char *filename) {
     for (int i = 0; i < MAX_FILE_LIST_LENGTH; ++i) {
-        if (our_files_exists[i] == 1 && strcmp(filename, our_files[i]) == 0) {
+        if (our_files_exist[i] == 1 && strcmp(filename, our_files[i]) == 0) {
             return i;
         }
     }
     return -1;
+}
+
+void clear_ip_con() {
+    for (int i = 0; i < MAX_BLACKLIST_SIZE; ++i) {
+        ip_con[i].exist = 0;
+        ip_con[i].number_of_connections_now = 0;
+    }
 }
 
 void clear_file_list() {
@@ -140,7 +231,7 @@ void clear_file_list() {
         file_list[i].present = 0;
 }
 
-void clear_file_list_where_node(const struct Node node) {
+void clear_file_list_where_node(struct Node node) {
     for (int i = 0; i < MAX_FILE_LIST_LENGTH; ++i)
         if (file_list[i].present == 1 && addrcmp(node.address, file_list[i].node.address) == 0)
             file_list[i].present = 0;
@@ -179,7 +270,7 @@ int find_known_node(const struct Node node) {
 }
 
 /** Finds new free slot and adds new assembled node in that slot. Returns pos of new added Node*/
-int add_known_node(const struct Node node) {
+int add_known_node(struct Node node) {
     fprintf(logs, "I am going to add node with name %s\n", node.name);
     if (addrcmp(node.address, our_node.address) == 0) {
         //Prevent to add myself
@@ -192,7 +283,6 @@ int add_known_node(const struct Node node) {
             if (known_nodes_exist[i] == 0) {
                 known_nodes[i] = node;
                 known_nodes_exist[i] = 1;
-
                 size_known_nodes++;
 
                 fprintf(logs, "Successfully added.\n");
@@ -224,7 +314,7 @@ int get_number_of_words_in(const char *filename) {
         fclose(file);
         return n;
     } else {
-        fprintf(logs,"no such file with name \"%s\"", filename);
+        fprintf(logs, "no such file with name \"%s\"", filename);
     }
     return -1;
 }
@@ -255,7 +345,7 @@ void make_visit(char *visit, int size_of_files) {
     int files_written = 0;
 
     for (int i = 0; i < MAX_FILE_LIST_LENGTH && files_written < size_of_files; ++i) {
-        if (our_files_exists[i] == 1) {
+        if (our_files_exist[i] == 1) {
             strcat(visit, our_files[i]);
             files_written++;
 
@@ -336,6 +426,7 @@ int parse_info_and_update(const char *visit, struct Node *their_node, int need_f
 void sync_with(const struct sockaddr_in to_connect) {
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     unsigned int len;
+    size_t nbytes;
     if (sockfd == -1) {
         fprintf(logs, "sync_with_known_nodes(): sockfd failed\n");
         exit(0);
@@ -343,36 +434,128 @@ void sync_with(const struct sockaddr_in to_connect) {
 
     if ((connect(sockfd, (struct sockaddr *) &to_connect, sizeof(to_connect))) != 0) {
         fprintf(logs, "sync_with_known_nodes(): Connection with %s:%u failed\n", inet_ntoa(to_connect.sin_addr), ntohs(to_connect.sin_port));
-        //TODO it would be better to delete known nodes if they are dead. But for the sake of simplicity and no-sync ability let it be.
+        //it would be better to delete known nodes if they are dead. But for the sake of simplicity and performance(no-sync) ability let it be.
         close(sockfd);
         return;
     }
+
     fprintf(logs, "sync_with_known_nodes(): Connected with %s:%u.\n", inet_ntoa(to_connect.sin_addr), ntohs(to_connect.sin_port));
 
     int msg = SYNC;
-    sendto(sockfd, &msg, sizeof(int), 0, (struct sockaddr *) &to_connect, sizeof(to_connect));
-
+    nbytes = sendto(sockfd, &msg, sizeof(int), 0, (struct sockaddr *) &to_connect, sizeof(to_connect));
+    if (nbytes == 0) {
+        close(sockfd);
+        return;
+    }
     // first: send our visit.
     char our_visit[MAX_VISIT_LENGTH];
     make_visit(our_visit, size_our_files); // make our visit.
-    sendto(sockfd, &our_visit[0], MAX_VISIT_LENGTH * sizeof(char), 0, (struct sockaddr *) &to_connect, sizeof(to_connect));
+    nbytes = sendto(sockfd, &our_visit[0], MAX_VISIT_LENGTH * sizeof(char), 0, (struct sockaddr *) &to_connect, sizeof(to_connect));
+    if (nbytes == 0) {
+        close(sockfd);
+        return;
+    }
 
     // second: accept their's visit.
     char their_visit[MAX_VISIT_LENGTH];
-    recvfrom(sockfd, &their_visit[0], MAX_VISIT_LENGTH * sizeof(char), 0, (struct sockaddr *) &to_connect, &len);
+    nbytes = recvfrom(sockfd, &their_visit[0], MAX_VISIT_LENGTH * sizeof(char), 0, (struct sockaddr *) &to_connect, &len);
+    if (nbytes == 0) {
+        close(sockfd);
+        return;
+    }
 
     // Parse it. Extract all info about files and make their_node.
     struct Node their_node;
     parse_info_and_update(their_visit, &their_node, 1);
 
-    // third: take n of nodes to accept.
+    // third: send number of nodes we are going to send.
+    int n = size_our_files;
+    sendto(sockfd, &n, sizeof(int), 0, (struct sockaddr *) &to_connect, sizeof(to_connect));
+
+    // fourth: send nodes
+    int sended = 0;
+    for (int i = 0; i < n && sended < n; ++i) {
+        if (known_nodes_exist[i]) {
+            char tmp_visit[MAX_VISIT_LENGTH];
+            make_visit(&tmp_visit[0], 0);
+            sendto(sockfd, &tmp_visit[0], MAX_VISIT_LENGTH * sizeof(char), 0, (struct sockaddr *) &to_connect, sizeof(to_connect));
+            sended++;
+        }
+
+        // Probably here should be usleep(10000);
+    }
+
+    close(sockfd);
+}
+
+void accept_sync(int sockfd, const struct sockaddr_in client_addr) {
+    char ip[MAX_IP_LENGTH];
+    strcpy(ip, inet_ntoa(client_addr.sin_addr));
+
+    if (pos_ip_in_blacklist(ip) >= 0) {
+        printf("%s in blacklist. Stop serve it.\n", ip);
+        return;
+    }
+
+    int ip_pos = increment_ip_con(ip);
+    if (ip_con[ip_pos].number_of_connections_now > MAX_SYNC_IN_MOMENT) {
+        //delete node if we have and blacklist it.
+        blacklist_ip(ip);
+        return;
+    }
+
+    //CRITICAL ZONE
+    pthread_mutex_lock(&sync_mutex);
+
+    struct Node their_node;
+    unsigned int len;
+    fprintf(logs, "SYNC received.\n");
+
+    // first we accept their's visit.
+    char their_visit[MAX_VISIT_LENGTH];
+    ssize_t nbytes = recvfrom(sockfd, &their_visit[0], MAX_VISIT_LENGTH * sizeof(char), 0, (struct sockaddr *) &client_addr, &len);
+    if (nbytes == 0) {
+        decrement_ip_con(ip);
+        pthread_mutex_unlock(&sync_mutex);
+        return;
+    }
+
+    // Parse it. Extract all info about files and make their_node.
+    parse_info_and_update(their_visit, &their_node, 1);
+    int pos_their_node = find_known_node(their_node);
+    if (pos_their_node == -1) {
+        pos_their_node = add_known_node(their_node);
+    }
+    known_nodes[pos_their_node].number_of_connection_now++;
+
+    // send our visit.
+    char our_visit[MAX_VISIT_LENGTH];
+    make_visit(our_visit, size_our_files); // make our visit.
+    nbytes = sendto(sockfd, &our_visit[0], MAX_VISIT_LENGTH * sizeof(char), 0, (struct sockaddr *) &client_addr, sizeof(client_addr));
+    if (nbytes == 0) {
+        decrement_ip_con(ip);
+        pthread_mutex_unlock(&sync_mutex);
+        return;
+    }
+
+    //receive number of nodes we're going to get.
     int n = 0;
-    recvfrom(sockfd, &n, sizeof(int), 0, (struct sockaddr *) &to_connect, &len);
+    nbytes = recvfrom(sockfd, &n, sizeof(int), 0, (struct sockaddr *) &client_addr, &len);
+    if (nbytes == 0) {
+        decrement_ip_con(ip);
+        pthread_mutex_unlock(&sync_mutex);
+        return;
+    }
+
     for (int i = 0; i < n; ++i) {
         struct Node tmp_node;
         char tmp_visit[MAX_VISIT_LENGTH];
-        recvfrom(sockfd, &tmp_visit, MAX_VISIT_LENGTH * sizeof(char), 0, (struct sockaddr *) &to_connect, &len);
-
+        nbytes = recvfrom(sockfd, &tmp_visit, MAX_VISIT_LENGTH * sizeof(char), 0, (struct sockaddr *) &client_addr, &len);
+        if (nbytes == 0) {
+            decrement_ip_con(ip);
+            pthread_mutex_unlock(&sync_mutex);
+            return;
+        }
         // Parse it.
         parse_info_and_update(tmp_visit, &tmp_node, 0); // 0 - don't touch files
 
@@ -382,61 +565,31 @@ void sync_with(const struct sockaddr_in to_connect) {
         }
     }
 
-    close(sockfd);
-}
-
-void accept_sync(const int common_sock_fd, const struct sockaddr_in client_addr) {
-    struct Node their_node;
-    unsigned int len;
-    fprintf(logs, "SYNC received.\n");
-
-    // first we accept their's visit.
-    char their_visit[MAX_VISIT_LENGTH];
-    recvfrom(common_sock_fd, &their_visit[0], MAX_VISIT_LENGTH * sizeof(char), 0, (struct sockaddr *) &client_addr, &len);
-
-    // Parse it. Extract all info about files and make their_node.
-    parse_info_and_update(their_visit, &their_node, 1);
-    if ((find_known_node(their_node)) == -1) {
-        add_known_node(their_node);
-    }
-
-    // send our visit.
-    char our_visit[MAX_VISIT_LENGTH];
-    make_visit(our_visit, size_our_files); // make our visit.
-    sendto(common_sock_fd, &our_visit[0], MAX_VISIT_LENGTH * sizeof(char), 0, (struct sockaddr *) &client_addr, sizeof(client_addr));
-
-    // send number of nodes we are going to send
-    int n = size_our_files;
-    sendto(common_sock_fd, &n, sizeof(int), 0, (struct sockaddr *) &client_addr, sizeof(client_addr));
-
-    //send nodes
-    int sended = 0;
-    for (int i = 0; i < n && sended < n; ++i) {
-        if (known_nodes_exist[i]) {
-            char tmp_visit[MAX_VISIT_LENGTH];
-            make_visit(&tmp_visit[0], 0);
-            sendto(common_sock_fd, &tmp_visit[0], MAX_VISIT_LENGTH * sizeof(char), 0, (struct sockaddr *) &client_addr, sizeof(client_addr));
-            sended++;
-        }
-    }
-
+    decrement_ip_con(ip);
+    pthread_mutex_unlock(&sync_mutex);
 }
 
 void accept_download(const int common_sock_fd, const struct sockaddr_in client_addr) {
     unsigned int len;
     ssize_t nbytes;
-    fprintf(logs, "download command received");
+    fprintf(logs, "download command received.\n");
 
     // first: receive name of a file
     char filename[MAX_FILE_NAME_LENGTH];
     nbytes = recvfrom(common_sock_fd, &filename, MAX_FILE_NAME_LENGTH * sizeof(char), 0, (struct sockaddr *) &client_addr, &len);
     filename[nbytes] = '\0';
+    if (nbytes == 0) {
+        return;
+    }
 
     // second: check if we have such file.
     int num_words = get_number_of_words_in(filename);
 
     // third: send number of words this file consists of
-    sendto(common_sock_fd, &num_words, sizeof(int), 0, (struct sockaddr *) &client_addr, sizeof(client_addr));
+    nbytes = sendto(common_sock_fd, &num_words, sizeof(int), 0, (struct sockaddr *) &client_addr, sizeof(client_addr));
+    if (nbytes == 0) {
+        return;
+    }
 
     // fourth: send file word-by-word
     if (num_words > 0) {
@@ -445,18 +598,25 @@ void accept_download(const int common_sock_fd, const struct sockaddr_in client_a
         for (int i = 0; i < num_words; ++i) {
             char str[MAX_WORD_LENGTH];
             fscanf(file, "%s", str);
-            sendto(common_sock_fd, &str, MAX_WORD_LENGTH * sizeof(char), 0, (struct sockaddr *) &client_addr, sizeof(client_addr));
+            nbytes = sendto(common_sock_fd, &str, MAX_WORD_LENGTH * sizeof(char), 0, (struct sockaddr *) &client_addr, sizeof(client_addr));
+            if (nbytes == 0) {
+                fclose(file);
+                return;
+            }
+
+            usleep(10000);
         }
 
+        fclose(file);
         printf("\"%s\" successfully uploaded.\n", filename);
         fprintf(logs, "\"%s\" successfully uploaded.\n", filename);
-    }
-    else{
+    } else {
         printf("We don't have file \"%s\".\n", filename);
         fprintf(logs, "We don't have file \"%s\".\n", filename);
     }
 
-
+    //"we should wait until client gets the message"
+    sleep(2);
 }
 
 /** Do the job with given connection (socket, client_addr) */
@@ -465,10 +625,14 @@ void *thread_work(void *data) {
     const int common_sock_fd = thread_data->sock_fd;
     const struct sockaddr_in client_addr = thread_data->client_addr;
 
-    unsigned int len; // we need it just to use in recvfrom.
+    unsigned int len;
     int command;
 
-    recvfrom(common_sock_fd, &command, sizeof(int), 0, (struct sockaddr *) &client_addr, &len);
+    size_t nbytes = recvfrom(common_sock_fd, &command, sizeof(int), 0, (struct sockaddr *) &client_addr, &len);
+    if (nbytes == 0) {
+        close(common_sock_fd);
+        return 0;
+    }
 
     if (command == SYNC) {
         accept_sync(common_sock_fd, client_addr);
@@ -496,18 +660,20 @@ void *sync_with_known_nodes(void *data) {
             }
         }
         fprintf(logs, "-------------------------------------\n");
-
+        fflush(logs);
         for (int i = 0; i < MAX_NEIGHBOURS; ++i) {
-            if (known_nodes_exist[i] == 1) { // 1 means there is a node
-                //update info about this node.
-                sync_with(known_nodes[i].address);
+            if (known_nodes_exist[i] == 1) {
+                if ((pos_ip_in_blacklist(inet_ntoa(known_nodes[i].address.sin_addr))) == -1)
+                    //update info about this node if it is exists and not in blacklist.
+                    sync_with(known_nodes[i].address);
             }
         }
-        sleep(10);
+        sleep(3);
     }
 }
 
 void *download(void *data) {
+    size_t nbytes;
     char *filename = (char *) data;
     printf("I want to download \"%s\".\n", filename);
 
@@ -542,14 +708,28 @@ void *download(void *data) {
     printf("*download: Connected with %s:%u successfully\n", inet_ntoa(to_connect.sin_addr), ntohs(to_connect.sin_port));
 
     int msg = REQUEST;
-    sendto(sockfd, &msg, sizeof(int), 0, (struct sockaddr *) &to_connect, sizeof(to_connect));
+    nbytes = sendto(sockfd, &msg, sizeof(int), 0, (struct sockaddr *) &to_connect, sizeof(to_connect));
+    if (nbytes == 0) {
+        close(sockfd);
+        return 0;
+    }
 
     // Send name of file we want to download
-    sendto(sockfd, filename, MAX_FILE_NAME_LENGTH, 0, (struct sockaddr *) &to_connect, sizeof(to_connect));
+    nbytes = sendto(sockfd, filename, MAX_FILE_NAME_LENGTH, 0, (struct sockaddr *) &to_connect, sizeof(to_connect));
+    if (nbytes == 0) {
+        close(sockfd);
+        return 0;
+    }
 
     // Get number of words in this file.
     int num_words;
-    recvfrom(sockfd, &num_words, sizeof(int), 0, (struct sockaddr *) &to_connect, &len);
+    nbytes = recvfrom(sockfd, &num_words, sizeof(int), 0, (struct sockaddr *) &to_connect, &len);
+    if (nbytes == 0) {
+        close(sockfd);
+        return 0;
+    }
+
+    // We don't consider case when file can be empty.
     if (num_words == -1) {
         printf("*download: their node doesn't have \"%s\".\n", filename);
         fprintf(logs, "*download: their node doesn't have \"%s\".\n", filename);
@@ -561,7 +741,12 @@ void *download(void *data) {
     FILE *out_file = fopen(strcat(folder, filename), "w");
     for (int i = 0; i < num_words; ++i) {
         char word[MAX_WORD_LENGTH];
-        ssize_t nbytes = recvfrom(sockfd, &word, MAX_WORD_LENGTH * sizeof(char), 0, (struct sockaddr *) &to_connect, &len);
+        nbytes = recvfrom(sockfd, &word, MAX_WORD_LENGTH * sizeof(char), 0, (struct sockaddr *) &to_connect, &len);
+        if (nbytes == 0) {
+            fclose(out_file);
+            close(sockfd);
+            return 0;
+        }
         word[nbytes] = '\0';
         fprintf(out_file, "%s ", word);
     }
@@ -573,11 +758,13 @@ void *download(void *data) {
 
     close(sockfd);
     fclose(out_file);
+
+    return 0;
 }
 
 /** Thread constantly waits for a command */
 void *interact_with_user(void *data) {
-    //TODO add "sync" command so that user can make connection manually.
+    //TODO add "sync" command so that user can make connection manually during runtime.
     pthread_t tmp_thread;
     while (1) {
         printf("I am waiting for the command: \n");
@@ -594,7 +781,7 @@ void *interact_with_user(void *data) {
         } else {
             printf("Unknown command.\n");
         }
-        sleep(1);
+        sleep(5);
     }
 }
 
@@ -687,17 +874,26 @@ void setup_node(int argc, char **argv) {
     }
 }
 
+void init_mutexes() {
+    if (pthread_mutex_init(&sync_mutex, NULL) != 0) {
+        printf("\n mutex init failed\n");
+        fprintf(logs, "\n mutex init failed\n");
+        exit(0);
+    }
+}
+
 /** ctrl+c is the only way to exit correctly */
-void sig_handler(int signo) {
-    if (signo == SIGINT) {
+void sig_handler(int sig) {
+    if (sig == SIGINT) {
         printf("\nReceived SIGINT. Exiting...\n");
     }
     close(master_sockfd);
     fclose(logs);
-    exit(1);
+    pthread_mutex_destroy(&sync_mutex);
+    exit(0);
 }
 
-/**
+/** IMPORTANT Put "FILES" folder near this file before run!!!!!1111!
  * Compile with your ip (use ifconfig to check) and port. You can change it in constants block.
  * Always run with name as argument. Then ip and port if you want to connect somewhere first.
  * All files which you want to share should be in folder "files". This folder and executable should be in the same place.
@@ -705,6 +901,8 @@ void sig_handler(int signo) {
  * Example of launching:
  * 1) ./node.out lol. -- node with name lol which just wait.
  * 2) ./node.out kek 192.168.0.1 2000 -- node with name "kek" which immediately connects to 192.168.0.1:2000.
+ *
+ * There will create file with name "logs.txt" where all logs will be saved.
  * */
 int main(int argc, char **argv) {
     if (argc == 1 || argc == 3 || argc > 4) {
@@ -716,8 +914,12 @@ int main(int argc, char **argv) {
 
     //clearing
     memset(known_nodes_exist, 0, sizeof(int) * MAX_NEIGHBOURS);
-    memset(our_files_exists, 0, sizeof(int) * MAX_FILE_LIST_LENGTH);
+    memset(our_files_exist, 0, sizeof(int) * MAX_FILE_LIST_LENGTH);
+    memset(blacklist_exist, 0, sizeof(int) * MAX_BLACKLIST_SIZE);
+    clear_ip_con();
     clear_file_list();
+
+    init_mutexes();
 
     //init files && start node.
     init_our_files();
